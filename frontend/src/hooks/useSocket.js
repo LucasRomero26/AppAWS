@@ -1,9 +1,9 @@
-// src/hooks/useSocket.js
+// src/hooks/useSocket.js - Versión Corregida
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { io } from 'socket.io-client';
 
 const config = {
-  SOCKET_URL: process.env.REACT_APP_SOCKET_URL || 'http://localhost:3000',
+  SOCKET_URL: import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000',
   SOCKET_OPTIONS: {
     transports: ['websocket', 'polling'],
     timeout: 20000,
@@ -24,10 +24,27 @@ export const useSocket = () => {
   
   const socketRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
+  const listenersRef = useRef(new Map()); // Para rastrear listeners activos
+
+  // Función para limpiar todos los listeners
+  const cleanupListeners = useCallback(() => {
+    if (socketRef.current) {
+      listenersRef.current.forEach((handler, eventName) => {
+        socketRef.current.off(eventName, handler);
+      });
+      listenersRef.current.clear();
+    }
+  }, []);
 
   // Función para crear y configurar el socket
   const createSocket = useCallback(() => {
-    console.log('������ Creando conexión WebSocket...');
+    console.log('🔌 Creando conexión WebSocket...');
+    
+    // Limpiar socket anterior si existe
+    if (socketRef.current) {
+      cleanupListeners();
+      socketRef.current.disconnect();
+    }
     
     const socket = io(config.SOCKET_URL, config.SOCKET_OPTIONS);
     
@@ -48,6 +65,11 @@ export const useSocket = () => {
       setIsConnected(false);
       setConnectionStatus('disconnected');
       setLastUpdate(Date.now());
+      
+      // Si la desconexión fue por error del servidor, intentar reconectar
+      if (reason === 'io server disconnect') {
+        socket.connect();
+      }
     });
 
     socket.on('connect_error', (error) => {
@@ -59,15 +81,18 @@ export const useSocket = () => {
     });
 
     socket.on('reconnect', (attemptNumber) => {
-      console.log('������ WebSocket reconectado en intento:', attemptNumber);
+      console.log('🔄 WebSocket reconectado en intento:', attemptNumber);
       setIsConnected(true);
       setConnectionStatus('connected');
       setError(null);
       setLastUpdate(Date.now());
+      
+      // Solicitar datos iniciales después de reconectar
+      socket.emit('request-initial-data');
     });
 
     socket.on('reconnect_attempt', (attemptNumber) => {
-      console.log('������ Intentando reconectar WebSocket...', attemptNumber);
+      console.log('🔄 Intentando reconectar WebSocket...', attemptNumber);
       setConnectionStatus('connecting');
     });
 
@@ -85,30 +110,29 @@ export const useSocket = () => {
 
     // Eventos de datos
     socket.on('connection-info', (info) => {
-      console.log('������ Info de conexión recibida:', info);
+      console.log('ℹ️ Info de conexión recibida:', info);
       setClientCount(info.totalClients || 0);
     });
 
     socket.on('client-count-update', (data) => {
-      console.log('������ Actualización de clientes:', data.totalClients);
+      console.log('👥 Actualización de clientes:', data.totalClients);
       setClientCount(data.totalClients || 0);
     });
 
     // Manejar pong del servidor
     socket.on('pong', (data) => {
-      console.log('������ Pong recibido del servidor:', data.timestamp);
+      console.log('🏓 Pong recibido del servidor:', data.timestamp);
+      setLastUpdate(Date.now());
     });
 
-    // Manejar respuesta de datos iniciales
-    socket.on('initial-data', (response) => {
-      console.log('������ Datos iniciales recibidos:', response);
-      if (response.success && response.data && response.data.length > 0) {
-        // Los datos iniciales se manejan en el componente que use este hook
-      }
+    // Manejar errores generales
+    socket.on('error', (error) => {
+      console.error('❌ Error de socket:', error);
+      setError(error.message || 'Error de socket');
     });
 
     return socket;
-  }, []);
+  }, [cleanupListeners]);
 
   // Inicializar socket
   useEffect(() => {
@@ -116,7 +140,8 @@ export const useSocket = () => {
 
     return () => {
       if (socketRef.current) {
-        console.log('������ Cerrando conexión WebSocket...');
+        console.log('🧹 Cerrando conexión WebSocket...');
+        cleanupListeners();
         socketRef.current.disconnect();
         socketRef.current = null;
       }
@@ -138,12 +163,21 @@ export const useSocket = () => {
 
   const on = useCallback((eventName, handler) => {
     if (socketRef.current) {
+      // Remover listener anterior si existe
+      if (listenersRef.current.has(eventName)) {
+        const oldHandler = listenersRef.current.get(eventName);
+        socketRef.current.off(eventName, oldHandler);
+      }
+      
+      // Agregar nuevo listener
       socketRef.current.on(eventName, handler);
+      listenersRef.current.set(eventName, handler);
       
       // Retornar función para limpiar el listener
       return () => {
         if (socketRef.current) {
           socketRef.current.off(eventName, handler);
+          listenersRef.current.delete(eventName);
         }
       };
     }
@@ -153,25 +187,33 @@ export const useSocket = () => {
   const off = useCallback((eventName, handler) => {
     if (socketRef.current) {
       socketRef.current.off(eventName, handler);
+      if (handler && listenersRef.current.get(eventName) === handler) {
+        listenersRef.current.delete(eventName);
+      }
     }
   }, []);
 
   // Función para reconectar manualmente
   const reconnect = useCallback(() => {
     if (socketRef.current) {
-      console.log('������ Reconectando manualmente...');
+      console.log('🔄 Reconectando manualmente...');
       setConnectionStatus('connecting');
+      setError(null);
       socketRef.current.connect();
+    } else {
+      // Crear nuevo socket si no existe
+      socketRef.current = createSocket();
     }
-  }, []);
+  }, [createSocket]);
 
   // Función para desconectar
   const disconnect = useCallback(() => {
     if (socketRef.current) {
-      console.log('������ Desconectando WebSocket...');
+      console.log('🔌 Desconectando WebSocket...');
+      cleanupListeners();
       socketRef.current.disconnect();
     }
-  }, []);
+  }, [cleanupListeners]);
 
   // Enviar ping cada 30 segundos para mantener la conexión activa
   useEffect(() => {
@@ -185,6 +227,15 @@ export const useSocket = () => {
 
     return () => clearInterval(pingInterval);
   }, [isConnected]);
+
+  // Limpiar timeouts al desmontar
+  useEffect(() => {
+    return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+    };
+  }, []);
 
   return {
     socket: socketRef.current,
